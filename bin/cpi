@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Dev launcher — runs pi with all cpi extensions and skills
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+exec pi \
+  -e "$DIR/extensions/auto-memory.ts" \
+  -e "$DIR/extensions/permissions.ts" \
+  -e "$DIR/extensions/plan-mode.ts" \
+  -e "$DIR/extensions/subagent.ts" \
+  -e "$DIR/extensions/hooks-compat.ts" \
+  -e "$DIR/extensions/init.ts" \
+  -e "$DIR/extensions/mcp.ts" \
+  -e "$DIR/extensions/rules.ts" \
+  -e "$DIR/extensions/doctor.ts" \
+  --skill "$DIR/skills/commit" \
+  --skill "$DIR/skills/review" \
+  "$@"

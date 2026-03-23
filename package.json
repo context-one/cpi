@@ -1,0 +1,17 @@
+{
+  "name": "@context-one/cpi",
+  "version": "0.1.0",
+  "description": "cpi (zippy) — Pre-configured pi coding agent harness with Claude Code-like UX",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/context-one/cpi.git"
+  },
+  "homepage": "https://contextone.dev",
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"],
+    "prompts": ["./prompts"]
+  }
+}

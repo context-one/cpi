@@ -1,0 +1,11 @@
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-1",
+  "thinkingLevel": "medium",
+  "compaction": {
+    "enabled": true
+  },
+  "packages": [
+    "@context-one/cpi"
+  ]
+}
