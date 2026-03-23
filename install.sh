@@ -12,6 +12,12 @@ CPI_PKG_DIR="${PI_CONFIG_DIR}/packages/cpi"
 CPI_WRAPPER_NAME="cpi"
 MIN_NODE_VERSION="20"
 
+# Extensions to install via `pi install`
+CPI_EXTENSIONS=(
+  "npm:pi-mcp-adapter"
+  "npm:pi-powerline-footer"
+)
+
 # --- Colors & formatting ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -169,6 +175,18 @@ merge_settings() {
   success "Merged settings: ${settings_file}"
 }
 
+install_extensions() {
+  if [ ${#CPI_EXTENSIONS[@]} -eq 0 ]; then return; fi
+  info "Installing extensions..."
+  for ext in "${CPI_EXTENSIONS[@]}"; do
+    if pi install "$ext" >/dev/null 2>&1; then
+      success "$ext"
+    else
+      warn "Failed to install $ext (you can retry with: pi install $ext)"
+    fi
+  done
+}
+
 install_wrapper() {
   local wrapper_dir
   local wrapper_path
@@ -221,6 +239,7 @@ main() {
   setup_config_dir
   install_cpi_package
   merge_settings
+  install_extensions
   install_wrapper
 
   printf "\n"

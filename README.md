@@ -23,7 +23,6 @@ pi \
   -e ./extensions/subagent.ts \
   -e ./extensions/hooks-compat.ts \
   -e ./extensions/init.ts \
-  -e ./extensions/mcp.ts \
   -e ./extensions/rules.ts \
   -e ./extensions/doctor.ts \
   --skill ./skills/commit \
@@ -52,7 +51,6 @@ pi /login
 | `plan-mode` | `/plan` and `/exitplan` — read-only planning with structured output |
 | `subagent` | `agent` tool + event bus API for spawning isolated pi processes |
 | `init` | `/init` — bootstraps a project, integrates existing `.claude/` config |
-| `mcp` | MCP server support — reads `.mcp.json`, spawns stdio/HTTP servers, registers tools |
 | `rules` | Loads `.claude/rules/*.md` with path-scoped frontmatter into system prompt |
 | `doctor` | `/doctor` — diagnostic health check for installation and configuration |
 
