@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "contextone": {
+      "type": "http",
+      "url": "https://contextone.dev/api/v1/mcp"
+    }
+  }
+}

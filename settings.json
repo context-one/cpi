@@ -1,7 +1,9 @@
 {
   "provider": "anthropic",
   "model": "claude-sonnet-4-1",
+  "theme": "claude-code",
   "thinkingLevel": "medium",
+  "hideThinkingBlock": true,
   "compaction": {
     "enabled": true
   },

@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import * as http from "node:http";
 import * as https from "node:https";
+import * as crypto from "node:crypto";
 
 /**
  * MCP (Model Context Protocol) Extension for cpi
@@ -71,6 +72,234 @@ interface McpServer {
 const MCP_PROTOCOL_VERSION = "2025-11-25";
 const REQUEST_TIMEOUT = 30_000;
 const INIT_TIMEOUT = 10_000;
+
+// --- OAuth / PKCE ---
+
+interface OAuthServerMeta {
+  authorization_endpoint: string;
+  token_endpoint: string;
+  registration_endpoint?: string;
+  code_challenge_methods_supported?: string[];
+}
+
+interface TokenRecord {
+  access_token: string;
+  refresh_token?: string;
+  expires_at?: number; // unix ms
+}
+
+const TOKEN_STORE_PATH = path.join(
+  process.env.HOME || process.env.USERPROFILE || "",
+  ".pi", "agent", "mcp-tokens.json"
+);
+
+function loadTokens(): Record<string, TokenRecord> {
+  try {
+    return JSON.parse(fs.readFileSync(TOKEN_STORE_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveToken(serverUrl: string, record: TokenRecord): void {
+  const tokens = loadTokens();
+  tokens[serverUrl] = record;
+  fs.mkdirSync(path.dirname(TOKEN_STORE_PATH), { recursive: true });
+  fs.writeFileSync(TOKEN_STORE_PATH, JSON.stringify(tokens, null, 2) + "\n");
+}
+
+function getToken(serverUrl: string): string | undefined {
+  const record = loadTokens()[serverUrl];
+  if (!record) return undefined;
+  if (record.expires_at && Date.now() > record.expires_at - 60_000) return undefined; // expired
+  return record.access_token;
+}
+
+function pkceVerifier(): string {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+function pkceChallenge(verifier: string): string {
+  return crypto.createHash("sha256").update(verifier).digest("base64url");
+}
+
+async function discoverOAuth(resourceUrl: string): Promise<OAuthServerMeta | null> {
+  const base = new URL(resourceUrl).origin;
+  for (const path_ of ["/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"]) {
+    try {
+      const res = await fetchJson(`${base}${path_}`);
+      if (res?.authorization_endpoint) return res as OAuthServerMeta;
+    } catch { /* try next */ }
+  }
+  return null;
+}
+
+function fetchJson(url: string, opts?: { method?: string; headers?: Record<string, string>; body?: string }): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const lib = parsed.protocol === "https:" ? https : http;
+    const body = opts?.body ? Buffer.from(opts.body) : undefined;
+    const req = lib.request(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method: opts?.method || "GET",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          ...(body ? { "Content-Length": body.length } : {}),
+          ...opts?.headers,
+        },
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (c: Buffer) => (data += c.toString()));
+        res.on("end", () => {
+          try { resolve(JSON.parse(data)); }
+          catch { reject(new Error(`Non-JSON response from ${url}: ${data.slice(0, 200)}`)); }
+        });
+      }
+    );
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+async function registerClient(registrationEndpoint: string, redirectUri: string): Promise<{ client_id: string }> {
+  const result = await fetchJson(registrationEndpoint, {
+    method: "POST",
+    body: JSON.stringify({
+      client_name: "cpi",
+      redirect_uris: [redirectUri],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+    }),
+  });
+  if (!result.client_id) throw new Error(`Client registration failed: ${JSON.stringify(result)}`);
+  return { client_id: result.client_id as string };
+}
+
+function startCallbackServer(port: number): {
+  ready: Promise<void>;
+  callback: Promise<{ code: string; state: string }>;
+  close: () => void;
+} {
+  let resolveCallback: (v: { code: string; state: string }) => void;
+  let rejectCallback: (e: Error) => void;
+  let resolveReady: () => void;
+
+  const ready = new Promise<void>((res) => { resolveReady = res; });
+  const callback = new Promise<{ code: string; state: string }>((res, rej) => {
+    resolveCallback = res;
+    rejectCallback = rej;
+  });
+
+  let settled = false;
+  const done = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
+
+  const timer = setTimeout(() => {
+    server.close();
+    done(() => rejectCallback(new Error("OAuth login timed out after 5 minutes")));
+  }, 5 * 60 * 1000);
+
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url!, `http://127.0.0.1:${port}`);
+    const code = url.searchParams.get("code");
+    const state = url.searchParams.get("state");
+    const error = url.searchParams.get("error");
+
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(`<html><body style="font-family:sans-serif;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+      <div style="text-align:center">
+        ${error
+          ? `<h2 style="color:#f28779">Error: ${error}</h2>`
+          : `<h2 style="color:#57c98a">Authenticated! You can close this tab.</h2>`}
+      </div>
+    </body></html>`);
+
+    clearTimeout(timer);
+    server.close();
+    if (error) { done(() => rejectCallback(new Error(`OAuth error: ${error}`))); return; }
+    if (code && state) done(() => resolveCallback({ code, state }));
+  });
+
+  server.on("error", (err) => { clearTimeout(timer); done(() => rejectCallback(err as Error)); });
+  server.listen(port, "127.0.0.1", () => resolveReady());
+
+  return { ready, callback, close: () => { clearTimeout(timer); server.close(); } };
+}
+
+async function oauthPkceFlow(serverUrl: string): Promise<string> {
+  const meta = await discoverOAuth(serverUrl);
+  if (!meta) throw new Error("Could not discover OAuth metadata from .well-known");
+
+  // Pick a random callback port
+  const port = 49152 + Math.floor(Math.random() * 16383);
+  const redirectUri = `http://127.0.0.1:${port}/callback`;
+
+  // Dynamic client registration (if supported)
+  let clientId = "cpi";
+  if (meta.registration_endpoint) {
+    const reg = await registerClient(meta.registration_endpoint, redirectUri);
+    clientId = reg.client_id;
+  }
+
+  const verifier = pkceVerifier();
+  const challenge = pkceChallenge(verifier);
+  const state = crypto.randomBytes(16).toString("hex");
+
+  const authUrl = new URL(meta.authorization_endpoint);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("client_id", clientId);
+  authUrl.searchParams.set("redirect_uri", redirectUri);
+  authUrl.searchParams.set("scope", "read write");
+  authUrl.searchParams.set("state", state);
+  authUrl.searchParams.set("code_challenge", challenge);
+  authUrl.searchParams.set("code_challenge_method", "S256");
+
+  // Start callback server and wait until listening before opening browser
+  const cb = startCallbackServer(port);
+  await cb.ready;
+
+  // Open browser using spawn to avoid shell metacharacter issues with & in URLs
+  const openCmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const openArgs = process.platform === "win32"
+    ? ["/c", "start", "", authUrl.toString()]
+    : [authUrl.toString()];
+  spawn(openCmd, openArgs, { detached: true, stdio: "ignore" }).unref();
+
+  const { code } = await cb.callback;
+
+  // Exchange code for token
+  const tokenParams = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: redirectUri,
+    client_id: clientId,
+    code_verifier: verifier,
+  });
+
+  const tokenRes = await fetchJson(meta.token_endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: tokenParams.toString(),
+  });
+
+  if (!tokenRes.access_token) throw new Error(`Token exchange failed: ${JSON.stringify(tokenRes)}`);
+
+  const record: TokenRecord = {
+    access_token: tokenRes.access_token as string,
+    refresh_token: tokenRes.refresh_token as string | undefined,
+    expires_at: tokenRes.expires_in
+      ? Date.now() + (tokenRes.expires_in as number) * 1000
+      : undefined,
+  };
+  saveToken(serverUrl, record);
+  return record.access_token;
+}
 
 // --- Environment variable expansion ---
 
@@ -189,10 +418,12 @@ function httpRequest(server: McpServer, request: JsonRpcRequest): Promise<JsonRp
     const isHttps = url.protocol === "https:";
     const lib = isHttps ? https : http;
 
+    const token = getToken(server.config.url!);
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Accept: "application/json, text/event-stream",
       "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...server.config.headers,
     };
 
@@ -307,17 +538,26 @@ async function initializeServer(server: McpServer): Promise<void> {
   const response = await Promise.race([init, initTimeout]);
 
   if (response.error) {
-    throw new Error(`MCP server ${server.name} init failed: ${response.error.message}`);
+    const msg = typeof response.error === "object"
+      ? (response.error.message ?? JSON.stringify(response.error))
+      : String(response.error);
+    throw new Error(`MCP server ${server.name} init failed: ${msg}`);
   }
 
   sendNotification(server, "notifications/initialized");
   server.ready = true;
 }
 
+function mcpErrorMessage(error: JsonRpcResponse["error"]): string {
+  if (!error) return "unknown error";
+  if (typeof error === "object") return error.message ?? JSON.stringify(error);
+  return String(error);
+}
+
 async function discoverTools(server: McpServer): Promise<McpTool[]> {
   const response = await sendRequest(server, "tools/list");
   if (response.error) {
-    throw new Error(`MCP tools/list failed for ${server.name}: ${response.error.message}`);
+    throw new Error(`MCP tools/list failed for ${server.name}: ${mcpErrorMessage(response.error)}`);
   }
 
   const tools = (response.result?.tools as McpTool[]) || [];
@@ -464,13 +704,137 @@ export default function mcp(pi: ExtensionAPI) {
     stopAllServers();
   });
 
+  async function addMcpServer(ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1]) {
+    const home = process.env.HOME || process.env.USERPROFILE || "";
+
+    // Step 1: server name
+    const name = await ctx.ui.input("Server name:", "e.g. my-server");
+    if (!name?.trim()) { ctx.ui.notify("Cancelled.", "info"); return; }
+
+    // Step 2: type
+    const type = await ctx.ui.select("Server type:", ["stdio", "http"]);
+    if (!type) { ctx.ui.notify("Cancelled.", "info"); return; }
+
+    let config: McpServerConfig;
+
+    if (type === "stdio") {
+      const command = await ctx.ui.input("Command:", "e.g. npx -y @modelcontextprotocol/server-filesystem");
+      if (!command?.trim()) { ctx.ui.notify("Cancelled.", "info"); return; }
+
+      const argsRaw = await ctx.ui.input("Args (space-separated, optional):", "");
+      const args = argsRaw?.trim() ? argsRaw.trim().split(/\s+/) : [];
+
+      config = { type: "stdio", command: command.trim(), ...(args.length ? { args } : {}) };
+    } else {
+      const url = await ctx.ui.input("Server URL:", "e.g. http://localhost:3000/mcp");
+      if (!url?.trim()) { ctx.ui.notify("Cancelled.", "info"); return; }
+      config = { type: "http", url: url.trim() };
+    }
+
+    // Step 3: where to save
+    const target = await ctx.ui.select("Save to:", [
+      `Project  (.mcp.json in ${ctx.cwd})`,
+      `Global   (~/.claude/.mcp.json)`,
+    ]);
+    if (!target) { ctx.ui.notify("Cancelled.", "info"); return; }
+
+    const configPath = target.startsWith("Project")
+      ? path.join(ctx.cwd, ".mcp.json")
+      : path.join(home, ".claude", ".mcp.json");
+
+    // Read existing config
+    let existing: McpConfig = { mcpServers: {} };
+    try {
+      existing = JSON.parse(fs.readFileSync(configPath, "utf8")) as McpConfig;
+      existing.mcpServers = existing.mcpServers || {};
+    } catch {
+      // File doesn't exist yet — start fresh
+    }
+
+    if (existing.mcpServers[name.trim()]) {
+      const overwrite = await ctx.ui.confirm(
+        "Server already exists",
+        `"${name.trim()}" is already configured. Overwrite?`
+      );
+      if (!overwrite) { ctx.ui.notify("Cancelled.", "info"); return; }
+    }
+
+    existing.mcpServers[name.trim()] = config;
+
+    // Ensure parent dir exists
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(existing, null, 2) + "\n");
+
+    ctx.ui.notify(
+      `Added "${name.trim()}" to ${configPath}\nRestart cpi (or open a new session) to connect.`,
+      "info"
+    );
+  }
+
   pi.registerCommand("mcp", {
-    description: "Show MCP server status and registered tools",
-    handler: async (_args, ctx) => {
+    description: "Manage MCP servers. Usage: /mcp [add|login [name]]",
+    handler: async (args, ctx) => {
+      const sub = args?.trim();
+
+      if (sub === "add") {
+        await addMcpServer(ctx);
+        return;
+      }
+
+      if (sub?.startsWith("login")) {
+        const serverName = sub.replace(/^login\s*/, "").trim();
+        const configs = loadMcpConfig(ctx.cwd);
+
+        // Resolve which server to log in to
+        let targetName = serverName;
+        if (!targetName) {
+          const httpServers = Object.entries(configs).filter(([, c]) => c.type === "http" || c.type === "sse");
+          if (httpServers.length === 0) {
+            ctx.ui.notify("No HTTP MCP servers configured.", "warning");
+            return;
+          }
+          if (httpServers.length === 1) {
+            targetName = httpServers[0][0];
+          } else {
+            const pick = await ctx.ui.select("Which server?", httpServers.map(([n]) => n));
+            if (!pick) return;
+            targetName = pick;
+          }
+        }
+
+        const config = configs[targetName];
+        if (!config) {
+          ctx.ui.notify(`Unknown server: ${targetName}`, "warning");
+          return;
+        }
+        if (config.type !== "http" && config.type !== "sse") {
+          ctx.ui.notify(`${targetName} is a stdio server — no OAuth needed.`, "info");
+          return;
+        }
+
+        ctx.ui.notify(`Opening browser for ${targetName} login...`, "info");
+        try {
+          await oauthPkceFlow(config.url!);
+          ctx.ui.notify(`Logged in to ${targetName}. Reconnecting...`, "info");
+          // Restart the server connection
+          const existing = servers.get(targetName);
+          if (existing) shutdownServer(existing);
+          servers.delete(targetName);
+          await startAllServers(ctx.cwd, (msg, level) => ctx.ui.notify(msg, level));
+        } catch (err) {
+          ctx.ui.notify(`Login failed: ${err}`, "error");
+        }
+        return;
+      }
+
+      // Default: show status
       if (servers.size === 0) {
         const configs = loadMcpConfig(ctx.cwd);
         if (Object.keys(configs).length === 0) {
-          ctx.ui.notify("No MCP servers configured.\nAdd servers to .mcp.json or .pi/mcp.json", "info");
+          ctx.ui.notify(
+            "No MCP servers configured.\nRun /mcp add to add one, or edit .mcp.json manually.\nRun /mcp login to authenticate with an HTTP server.",
+            "info"
+          );
         } else {
           ctx.ui.notify(
             `${Object.keys(configs).length} MCP server(s) configured but not running.\nRestart session to connect.`,
@@ -489,6 +853,7 @@ export default function mcp(pi: ExtensionAPI) {
         }
         lines.push("");
       }
+      lines.push('Run "/mcp add" to add a server, "/mcp login [name]" to authenticate.');
 
       ctx.ui.notify(lines.join("\n"), "info");
     },

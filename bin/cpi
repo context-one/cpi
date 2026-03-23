@@ -16,4 +16,5 @@ exec pi \
   -e "$DIR/extensions/doctor.ts" \
   --skill "$DIR/skills/commit" \
   --skill "$DIR/skills/review" \
+  --theme "$DIR/themes/claude-code.json" \
   "$@"
