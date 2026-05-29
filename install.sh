@@ -12,11 +12,12 @@ CPI_PKG_DIR="${PI_CONFIG_DIR}/packages/cpi"
 CPI_WRAPPER_NAME="cpi"
 MIN_NODE_VERSION="20"
 
-# Extensions to install via `pi install`
-CPI_EXTENSIONS=(
-  "npm:pi-mcp-adapter"
-  "npm:pi-powerline-footer"
-)
+# Companion extensions are now declared in package.json under the
+# top-level `cpi.extensions` array — single source of truth so both
+# this installer and the contextone container's session-start path
+# read the same list. CPI_EXTENSIONS gets populated lazily from the
+# cloned repo's package.json in install_extensions().
+CPI_EXTENSIONS=()
 
 # --- Colors & formatting ---
 RED='\033[0;31m'
@@ -176,15 +177,32 @@ merge_settings() {
 }
 
 install_extensions() {
-  if [ ${#CPI_EXTENSIONS[@]} -eq 0 ]; then return; fi
-  info "Installing extensions..."
-  for ext in "${CPI_EXTENSIONS[@]}"; do
+  # Pull the companion extension list out of the cloned package.json
+  # so the installer and contextone share one source of truth.
+  local pkg="${CPI_PKG_DIR}/package.json"
+  if [ ! -f "$pkg" ]; then
+    warn "package.json not found at ${pkg}; skipping companion extensions"
+    return
+  fi
+
+  local list
+  list=$(node -e "
+    const pkg = require('${pkg}');
+    const ext = (pkg.cpi && pkg.cpi.extensions) || [];
+    process.stdout.write(ext.join('\\n'));
+  " 2>/dev/null || true)
+
+  if [ -z "$list" ]; then return; fi
+
+  info "Installing companion extensions..."
+  while IFS= read -r ext; do
+    [ -z "$ext" ] && continue
     if pi install "$ext" >/dev/null 2>&1; then
       success "$ext"
     else
       warn "Failed to install $ext (you can retry with: pi install $ext)"
     fi
-  done
+  done <<< "$list"
 }
 
 install_wrapper() {

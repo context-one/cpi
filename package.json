@@ -1,6 +1,6 @@
 {
   "name": "@context-one/cpi",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "cpi (zippy) — Pre-configured pi coding agent harness with Claude Code-like UX",
   "keywords": ["pi-package"],
   "license": "MIT",
@@ -14,5 +14,16 @@
     "skills": ["./skills"],
     "prompts": ["./prompts"],
     "themes": ["./themes"]
+  },
+  "dependencies": {
+    "pi-mcp-adapter": "^2.8.0",
+    "pi-powerline-footer": "^0.5.6"
+  },
+  "cpi": {
+    "_comment": "Companion pi extensions that cpi expects to be installed alongside it. Listed here as the single source of truth — install.sh reads this when running on a user's laptop, and the contextone container's session-start path reads it when provisioning a cloud pi session.",
+    "extensions": [
+      "npm:pi-mcp-adapter",
+      "npm:pi-powerline-footer"
+    ]
   }
 }
