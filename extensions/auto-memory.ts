@@ -228,7 +228,7 @@ export default function autoMemory(pi: ExtensionAPI) {
 
   // After each agent turn, trigger background memory extraction via subagent
   pi.on("agent_end", async (_event, ctx) => {
-    if (!memoryDir || !extractEnabled) return;
+    if (!memoryDir || !extractEnabled || process.env.PI_SUBAGENT_CHILD === "1") return;
 
     turnsSinceExtraction++;
     if (turnsSinceExtraction < EXTRACT_EVERY_N_TURNS) return;
@@ -254,6 +254,7 @@ export default function autoMemory(pi: ExtensionAPI) {
     pi.events.emit("subagent:spawn-async", {
       prompt: extractionPrompt,
       description: "memory extraction",
+      context: "fork", // Extraction needs the conversation, not just its instructions.
       background: true,
       cwd: ctx.cwd,
       onComplete: (result: { success: boolean; output: string }) => {

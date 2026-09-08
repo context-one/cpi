@@ -23,3 +23,5 @@ jobs:
       # Resolve the published dependencies from scratch, as pi install does.
       # No lockfile or peer-dependency bypass should hide incompatible ranges.
       - run: npm install --omit=dev --ignore-scripts --no-audit --no-fund --package-lock=false
+      - run: npm install --include=dev --ignore-scripts --no-audit --no-fund --package-lock=false
+      - run: npm test
