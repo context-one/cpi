@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { createServer } from "node:http";
@@ -43,8 +43,19 @@ test("Pi loads the companion and runs parallel children and CPI delegation", { t
     await new Promise((resolve) => setTimeout(resolve, 200));
     res.writeHead(200, { "Content-Type": "text/event-stream" });
     const base = { id: "fixture", object: "chat.completion.chunk", created: 1, model: "fixture" };
-    res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: { role: "assistant", content: "fixture-result" }, finish_reason: null }] })}\n\n`);
-    res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } })}\n\n`);
+    const isExtraction = JSON.stringify(body.messages).includes("You are now acting as the memory extraction subagent");
+    const hasToolResult = body.messages.some((message: any) => message.role === "tool");
+    const writeMemory = isExtraction && !hasToolResult;
+    const delta = writeMemory ? {
+      role: "assistant", tool_calls: [{ index: 0, id: "fixture-write", type: "function", function: {
+        name: "write", arguments: JSON.stringify({
+          path: join(agentDir, "projects", root.replace(/[/\\]/g, "-"), "memory", "fixture.md"),
+          content: "---\nname: Fixture\ndescription: Test-only memory\n---\nPARENT_CONTEXT_MARKER\n",
+        }),
+      } }],
+    } : { role: "assistant", content: "fixture-result" };
+    res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
+    res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: writeMemory ? "tool_calls" : "stop" }], usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } })}\n\n`);
     active--;
     res.end("data: [DONE]\n\n");
   });
@@ -90,14 +101,22 @@ test("Pi loads the companion and runs parallel children and CPI delegation", { t
   assert.match(JSON.stringify(result), /fixture-result/);
   assert.equal(peak, 2, "child model requests must overlap");
 
-  // Seed a parent turn to prove that extraction receives forked conversation.
+  // Exercise the real third-turn extraction trigger while the parent's
+  // agent_end event is still being handled, with its conversation forked.
+  await session.prompt("First parent turn", { expandPromptTemplates: false });
+  await session.prompt("Second parent turn", { expandPromptTemplates: false });
+  const extractionComplete = new Promise<any>((resolve) => {
+    const unsubscribe = events.on("subagent:stop", (data: any) => {
+      if (data.agent_type !== "memory extraction") return;
+      unsubscribe();
+      resolve(data);
+    });
+  });
   await session.prompt("PARENT_CONTEXT_MARKER", { expandPromptTemplates: false });
-  const completion = new Promise<any>((resolve) => events.emit("subagent:spawn-async", {
-    prompt: "Extract fixture context", context: "fork", onComplete: resolve,
-  }));
-  const extracted = await completion;
+  const extracted = await extractionComplete;
   assert.equal(extracted.success, true, JSON.stringify(extracted));
-  assert.equal(extracted.output, "fixture-result");
+  assert.equal(extracted.last_assistant_message, "fixture-result");
+  assert.match(await readFile(join(agentDir, "projects", root.replace(/[/\\]/g, "-"), "memory", "fixture.md"), "utf8"), /PARENT_CONTEXT_MARKER/);
   assert.ok(requests.at(-1).messages.some((message: any) => JSON.stringify(message).includes("PARENT_CONTEXT_MARKER")));
   // A detached child must complete and emit a result, not merely acknowledge launch.
   const backgroundComplete = new Promise<any>((resolve) => {
