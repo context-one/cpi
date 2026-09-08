@@ -6,11 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **cpi** (spoken "zippy") is a pre-configured [pi coding agent](https://github.com/badlogic/pi-mono) harness that replicates Claude Code's UX. It is NOT a fork of pi — it's a pi package containing extensions, skills, and an installer. Users run `curl -fsSL https://contextone.dev/install | bash` and get a fully configured coding agent.
 
+The `pi-subagents` companion owns the model-facing `subagent` tool and execution. `extensions/subagent.ts` only adapts CPI events to its public structured delegation API. Do not reintroduce a custom child-process launcher or a duplicate `agent` tool.
+
 ## Running Locally
 
-Requires Node.js >= 20 (mise config pins Node 24):
+Requires Node.js >= 22.19 (mise config pins Node 24):
 
 ```bash
+# Install dependencies and the pinned companion first
+npm install
+pi install npm:pi-subagents@0.66.0
+
 # Run pi with all cpi extensions loaded
 pi -e ./extensions/auto-memory.ts -e ./extensions/permissions.ts -e ./extensions/plan-mode.ts -e ./extensions/subagent.ts -e ./extensions/hooks-compat.ts -e ./extensions/init.ts --skill ./skills/commit --skill ./skills/review
 ```
@@ -19,11 +25,12 @@ There is no build step — pi loads TypeScript extensions directly via jiti.
 
 ## Architecture
 
-Six extensions in `extensions/`, each a standalone pi extension exporting `default function(pi: ExtensionAPI)`. They communicate through pi's event bus (`pi.events.emit`/`pi.events.on`), not direct imports.
+Extensions in `extensions/`, each a standalone pi extension exporting `default function(pi: ExtensionAPI)`. They communicate through pi's event bus (`pi.events.emit`/`pi.events.on`), not direct imports.
 
 **Extension dependency graph:**
 ```
 auto-memory.ts ──emits──▶ subagent:spawn-async ──▶ subagent.ts
+subagent.ts ───delegates──▶ pi-subagents (companion)
 subagent.ts ───emits──▶ subagent:start/stop ────▶ hooks-compat.ts
 hooks-compat.ts reads .claude/settings.json for hook definitions
 permissions.ts and plan-mode.ts hook into tool_call independently

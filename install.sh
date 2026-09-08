@@ -6,11 +6,11 @@ set -euo pipefail
 # --- Configuration ---
 CPI_REPO="context-one/cpi"
 CPI_BRANCH="main"
-PI_PKG="@mariozechner/pi-coding-agent"
+PI_PKG="@earendil-works/pi-coding-agent"
 PI_CONFIG_DIR="${HOME}/.pi/agent"
 CPI_PKG_DIR="${PI_CONFIG_DIR}/packages/cpi"
 CPI_WRAPPER_NAME="cpi"
-MIN_NODE_VERSION="20"
+MIN_NODE_VERSION="22.19.0"
 
 # Companion extensions are now declared in package.json under the
 # top-level `cpi.extensions` array — single source of truth so both
@@ -62,9 +62,13 @@ check_node() {
     fatal "Node.js is required but not found. Install Node.js >= ${MIN_NODE_VERSION} from https://nodejs.org"
   fi
 
-  local node_major
-  node_major="$(node -e 'console.log(process.versions.node.split(".")[0])')"
-  if [ "$node_major" -lt "$MIN_NODE_VERSION" ]; then
+  if ! node -e '
+    const actual = process.versions.node.split(".").map(Number);
+    const minimum = process.argv[1].split(".").map(Number);
+    for (let i = 0; i < minimum.length; i++) {
+      if (actual[i] !== minimum[i]) process.exit(actual[i] > minimum[i] ? 0 : 1);
+    }
+  ' "$MIN_NODE_VERSION"; then
     fatal "Node.js >= ${MIN_NODE_VERSION} required (found v$(node --version)). Please upgrade: https://nodejs.org"
   fi
   success "Node.js $(node --version)"
@@ -90,6 +94,11 @@ install_pi() {
     info "pi is already installed ($(pi --version 2>/dev/null || echo 'unknown')), updating..."
   else
     info "Installing pi coding agent..."
+  fi
+  # The old npm package owns the same `pi` executable. Remove it before
+  # installing the renamed package so npm does not fail with EEXIST.
+  if npm list -g --depth=0 @mariozechner/pi-coding-agent >/dev/null 2>&1; then
+    npm uninstall -g @mariozechner/pi-coding-agent
   fi
   npm install -g "${PI_PKG}@latest" --silent 2>/dev/null || npm install -g "${PI_PKG}@latest"
   success "pi $(pi --version 2>/dev/null || echo 'installed')"
