@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "pi-mcp-adapter": "^2.8.0",
-    "pi-powerline-footer": "^0.5.6"
+    "pi-powerline-footer": "^0.17.0"
   },
   "cpi": {
     "_comment": "Companion pi extensions that cpi expects to be installed alongside it. Listed here as the single source of truth — install.sh reads this when running on a user's laptop, and the contextone container's session-start path reads it when provisioning a cloud pi session.",
